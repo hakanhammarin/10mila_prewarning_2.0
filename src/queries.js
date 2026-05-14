@@ -131,6 +131,35 @@ export const QUERIES = {
     ORDER BY st.passedTime ASC
   `,
 
+  // Splittime rows for the configured "last checkpoint" name (e.g. "100")
+  // that have been modified since :since. The control number itself can
+  // differ between race classes — OLA stores the per-class assignment in
+  // raceclasssplittimecontrols, keyed by name. We look up by NAME the
+  // same way Prewarning does, so a relay where leg 4 uses ctrl 100 and
+  // leg 5 uses ctrl 101 (both named "100") would both fire.
+  //
+  // The poller feeds the resultIds it finds into Store.recordLastCheckpoint
+  // so the row's "Last" badge + (in checkpoint yellow mode) the yellow
+  // stripe fire when the runner passes the control before the finish.
+  lastCheckpointSince: `
+    SELECT
+      st.resultRaceIndividualNumber AS resultId,
+      st.passedTime                 AS punchedAt,
+      st.modifyDate                 AS stModifyDate
+    FROM splittimes st
+    INNER JOIN results r
+      ON r.resultId = st.resultRaceIndividualNumber
+    WHERE EXISTS (
+            SELECT 1
+            FROM raceclasssplittimecontrols c
+            WHERE c.raceClassId       = r.raceClassId
+              AND c.splitTimeControlId = st.timingControl
+              AND c.name              = ?
+          )
+      AND st.modifyDate > ?
+    ORDER BY st.modifyDate ASC
+  `,
+
   // ETA seed: completed runners (finishTime IS NOT NULL) we already have a
   // Prewarning passing for. Keyed by raceClassId — each leg is its own
   // raceClassId so this implicitly partitions per leg.

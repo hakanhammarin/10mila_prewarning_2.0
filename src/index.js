@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { loadConfig } from "./config.js";
 import { FailoverPool } from "./db.js";
-import { Store, DEFAULT_ETA_SECONDS } from "./state.js";
+import { Store } from "./state.js";
 import { SseBroker } from "./sse.js";
 import { Poller } from "./poll.js";
 import { logger } from "./log.js";
@@ -17,13 +17,15 @@ async function main() {
   log.info(`Config loaded from ${cfg.__source}`);
 
   const db = new FailoverPool(cfg);
-  const store = new Store();
+  const store = new Store(cfg.state);
   const broker = new SseBroker();
   const poller = new Poller({
     db,
     store,
     broker,
-    intervalMs: cfg.poll_interval_ms,
+    intervalSeconds: cfg.poll_interval_s,
+    lastCheckpointName: cfg.state.last_checkpoint_name,
+    startupLookbackSeconds: cfg.state.startup_lookback_s,
   });
 
   db.onActiveChange((active) => {
@@ -74,14 +76,14 @@ async function main() {
         rows: store.rowsForGroup(group),
         classes: store.groupList(),
         failover: db.isFailedOver(),
-        etaConfig: { defaultS: DEFAULT_ETA_SECONDS },
+        etaConfig: { defaultS: store.defaultEtaSeconds },
       });
     } else {
       broker.send(client, {
         type: "classes",
         classes: store.groupList(),
         failover: db.isFailedOver(),
-        etaConfig: { defaultS: DEFAULT_ETA_SECONDS },
+        etaConfig: { defaultS: store.defaultEtaSeconds },
       });
     }
   });

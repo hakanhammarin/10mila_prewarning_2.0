@@ -12,12 +12,63 @@ mysql:
     password: ""
     database: tiomila2026
 
-poll_interval_ms: 1000
+# All durations are in seconds.
+poll_interval_s: 1
 http_port: 8080
 
-# Tröskel för failover: antal pollar i rad som måste misslyckas innan vi
-# byter till sekundär, samt query-timeout i ms.
+# Failover-tröskel: antal pollar i rad som måste misslyckas innan vi
+# byter till sekundär, samt query-timeout och primär-recheck.
 failover:
   failures_before_switch: 3
-  query_timeout_ms: 3000
-  primary_recheck_ms: 30000
+  query_timeout_s: 3
+  primary_recheck_s: 30
+
+# State-machine + ETA settings. All durations are in seconds. Tune these
+# without touching code — they're read once at startup and threaded into
+# state.js. Defaults below match the prewarning spec (3:00 default ETA,
+# 60 s green, 60 s yellow window, 5 s post-finish display).
+state:
+  # GREEN stripe: how long after prewarning before flipping to YELLOW
+  # under the time-based rule. Ignored when yellow_mode = "checkpoint".
+  green_s: 60
+  # YELLOW also fires when the countdown has this many seconds (or less)
+  # remaining — for short legs this hits before green_s, for long legs
+  # green_s wins. Ignored when yellow_mode = "checkpoint".
+  yellow_remaining_s: 60
+  # How long after the finish punch the row stays RED before being
+  # removed (unless readInTime fires sooner).
+  post_finish_remove_s: 5
+  # Default ETA shown in the topbar + used per row until the rolling
+  # average has at least one in-range sample.
+  default_eta_s: 180
+  # Rolling-average sample bounds: drop anything outside [min_s, max_s]
+  # as noise / outliers before averaging.
+  eta_sample_min_s: 2
+  eta_sample_max_s: 600
+  # How many recent samples (per class) to keep in the rolling window.
+  eta_sample_keep: 50
+
+  # Yellow-stripe trigger mode:
+  #   "time"       — green_s elapsed OR yellow_remaining_s left of countdown
+  #   "checkpoint" — runner has punched the `last_checkpoint_control` punch
+  # Forces a minimum prewarning (GREEN/YELLOW) visibility when prewarn +
+  # finish arrive in the same poll (SimOLA fast-replay). Real races never
+  # trigger it.
+  min_prewarn_dwell_s: 60
+
+  # On startup, only fetch splittime rows modified within this window so
+  # a mid-race restart doesn't replay every prewarn that ever happened.
+  # The window should cover one full prewarn lifecycle (dwell + post-
+  # finish) plus margin.
+  startup_lookback_s: 300
+
+  yellow_mode: time
+
+  # Name of the "Last" checkpoint as it appears in raceclasssplittimecontrols
+  # (same pattern as the Prewarning lookup). Per-class control numbers can
+  # differ but share the name; e.g. leg 1 has it on ctrl 100 while leg 2
+  # has it on ctrl 101, both rows named "100". When a runner punches a
+  # control whose name matches, the row gets a "Last" badge in the same
+  # column as "Finish", and (if yellow_mode = "checkpoint") the stripe
+  # flips to YELLOW.
+  last_checkpoint_name: "100"

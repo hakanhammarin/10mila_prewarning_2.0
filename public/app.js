@@ -164,28 +164,31 @@ function renderAll() {
   renderRows();
 }
 
-// Topbar ETA panel: always shows the configured default; the "Avg ETA"
-// row appears only when at least one currently-visible row has switched
-// to a measured value that differs from the default.
+// Topbar ETA panel: shows EITHER the default ETA (when no measured
+// average has kicked in yet) OR the measured average (which replaces the
+// default once one or more legs have collected real samples). Both rows
+// are never visible at the same time — the user only needs to see the
+// value the countdown is actually anchored on.
 function renderEta() {
   const def = STATE.defaultEtaS;
-  const defEl = $("eta-default");
-  if (def == null) {
-    defEl.textContent = "--:--";
-  } else {
-    defEl.textContent = formatMS(def);
-  }
+  const measured = measuredEtaAverage();
 
+  const defRow = $("eta-default-row");
+  const defEl = $("eta-default");
   const avgRow = $("eta-avg-row");
   const avgEl = $("eta-avg");
-  const measured = measuredEtaAverage();
-  if (measured == null) {
-    avgRow.hidden = true;
-    avgEl.textContent = "--:--";
+
+  if (measured != null) {
+    defRow.hidden = true;
+    avgRow.hidden = false;
+    avgEl.textContent = formatMS(measured);
     return;
   }
-  avgRow.hidden = false;
-  avgEl.textContent = formatMS(measured);
+
+  defRow.hidden = false;
+  avgRow.hidden = true;
+  avgEl.textContent = "--:--";
+  defEl.textContent = def == null ? "--:--" : formatMS(def);
 }
 
 function measuredEtaAverage() {
@@ -315,10 +318,20 @@ function updateRowEl(li, row) {
   li.dataset.finishAt = row.finishAt ? String(row.finishAt) : "";
 }
 
-// "Finish" appears just left of the leg badge once the finish punch has
-// landed (stripe red). Empty otherwise.
+// Status badge in the Finish column, just left of the leg badge:
+//   "Finish" once the finish punch has landed (stripe red)
+//   "Last"   when the runner has punched the last-checkpoint control AND
+//            that anchor moment has been reached (server may park it in
+//            the future during SimOLA fast-replay so the GREEN phase
+//            renders first — gate on nowMs() to stay in sync with the
+//            stripe).
+//   empty    otherwise
 function finishLabel(row) {
-  return row.stripe === "red" ? "Finish" : "";
+  if (row.stripe === "red") return "Finish";
+  if (row.lastCheckpointAt != null && row.lastCheckpointAt <= nowMs()) {
+    return "Last";
+  }
+  return "";
 }
 
 function legBadge(leg) {
@@ -360,24 +373,28 @@ function updateCountdown(li, row, now = nowMs()) {
     cd.classList.remove("frozen");
     return;
   }
-  // After finish: count down to removeAt (server-supplied = finishAt + 30 s)
-  // so the user still sees a "time until row removal" indicator while RED.
-  // Falls back to the previous frozen "0:00" only if the row outlives its
-  // removeAt (between poll ticks) or the field is missing.
-  if (row.finishAt) {
-    if (row.removeAt) {
-      const remainMs = row.removeAt - now;
-      if (remainMs > 0) {
-        const s = Math.ceil(remainMs / 1000);
-        cd.textContent = `0:${pad(s)}`;
-        cd.classList.remove("frozen");
-        return;
-      }
-    }
-    cd.textContent = "0:00";
-    cd.classList.add("frozen");
+  // After finish has ACTUALLY arrived (finishAt <= now): count UP from
+  // 0:00 into negative — 0:00 at the moment of finish, -0:01 a second
+  // later, etc. The server removes the row once now - finishAt >
+  // post_finish_remove_s, so the display caps near e.g. -0:30.
+  //
+  // finishAt MAY be parked in the future when prewarn + finish arrived
+  // in the same poll (SimOLA fast-replay / restart-with-finished-data).
+  // In that case the server keeps the stripe GREEN/YELLOW until the
+  // dwell elapses, and we render the normal prewarn countdown — not the
+  // post-finish display. Otherwise the user sees a red 0:00 next to a
+  // green stripe.
+  if (row.finishAt && row.finishAt <= now) {
+    const elapsedMs = now - row.finishAt;
+    const s = Math.floor(elapsedMs / 1000);
+    const mm = Math.floor(s / 60);
+    const ss = s % 60;
+    cd.textContent = `${s > 0 ? "-" : ""}${mm}:${pad(ss)}`;
+    cd.classList.add("post-finish");
+    cd.classList.remove("frozen");
     return;
   }
+  cd.classList.remove("post-finish");
   const target = row.prewarnAt + (row.etaSeconds || 180) * 1000;
   const remainMs = target - now;
   if (remainMs <= 0) {

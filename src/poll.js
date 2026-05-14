@@ -4,13 +4,32 @@ import { logger } from "./log.js";
 const log = logger("poll");
 
 export class Poller {
-  constructor({ db, store, broker, intervalMs }) {
+  constructor({
+    db,
+    store,
+    broker,
+    intervalSeconds,
+    lastCheckpointName,
+    startupLookbackSeconds,
+  }) {
     this.db = db;
     this.store = store;
     this.broker = broker;
-    this.intervalMs = intervalMs;
+    this.intervalMs = intervalSeconds * 1000;
+    this.lastCheckpointName = lastCheckpointName;
 
-    this.lastModify = SQL_EPOCH;
+    // Both watermarks start `startup_lookback_s` seconds in the past so
+    // a mid-race restart re-fetches the history it needs to recover the
+    // correct state. 0 = read since the epoch (no limit) — the state
+    // machine uses DB modifyDates as anchors so already-finished rows
+    // are dropped by the POST_FINISH window.
+    const lookbackS = startupLookbackSeconds ?? 0;
+    const startWatermark =
+      lookbackS > 0
+        ? formatMysqlDate(new Date(Date.now() - lookbackS * 1000))
+        : SQL_EPOCH;
+    this.lastModify = startWatermark;
+    this.lastCpModify = startWatermark;
     // raceClassIds we have already loaded ETA samples for (each raceClassId
     // already corresponds to a single relay leg in this schema).
     this.etaSeeded = new Set();
@@ -71,6 +90,7 @@ export class Poller {
   async _tick() {
     await this._refreshClassesIfNeeded();
     await this._pollPrewarning();
+    await this._pollLastCheckpoint();
     await this._timeBasedRecompute();
     this._broadcastFailoverIfChanged();
   }
@@ -165,6 +185,60 @@ export class Poller {
   async _seedEta(raceClassId) {
     const samples = await this.db.query(QUERIES.finishedSamples, [raceClassId]);
     this.store.setFinishedSamples(raceClassId, samples);
+  }
+
+  // Watch splittimes for the configured "last checkpoint" name (looked
+  // up in raceclasssplittimecontrols, same pattern as Prewarning — so
+  // per-class control numbers can differ). For each new punch, anchor
+  // lastCheckpointAt on the active prewarning row (if any) and broadcast
+  // a diff so the client repaints the "Last" badge + stripe.
+  async _pollLastCheckpoint() {
+    if (!this.lastCheckpointName) return;
+    let rows;
+    try {
+      rows = await this.db.query(QUERIES.lastCheckpointSince, [
+        this.lastCheckpointName,
+        this.lastCpModify,
+      ]);
+    } catch (err) {
+      return;
+    }
+    let highWater = this.lastCpModify;
+    const grouped = new Map();
+    for (const r of rows) {
+      const mod = r.stModifyDate;
+      const modDate = mod
+        ? mod instanceof Date
+          ? mod
+          : new Date(mod)
+        : null;
+      const modStr = modDate ? formatMysqlDate(modDate) : null;
+      if (modStr && (!highWater || modStr > highWater)) highWater = modStr;
+
+      // Anchor lastCheckpointAt at the real-clock time of the punch (the
+      // splittime row's modifyDate). For live rows that's ~now; for
+      // catch-up back-fill it's the actual punch time, so the state
+      // machine knows whether the runner has been past the last
+      // checkpoint for seconds or minutes.
+      const observedAt = modDate ? modDate.getTime() : Date.now();
+      const change = this.store.recordLastCheckpoint(r.resultId, observedAt);
+      if (!change) continue;
+      const bucket = grouped.get(change.raceClassId) ??
+        grouped
+          .set(change.raceClassId, { added: [], updated: [], removed: [] })
+          .get(change.raceClassId);
+      bucket.updated.push(change.row);
+    }
+    if (highWater) this.lastCpModify = highWater;
+
+    for (const [raceClassId, diff] of grouped) {
+      if (diff.updated.length === 0) continue;
+      this.broker.broadcast(raceClassId, {
+        type: "diff",
+        ...diff,
+        failover: this.db.isFailedOver(),
+      });
+    }
   }
 
   async _timeBasedRecompute() {

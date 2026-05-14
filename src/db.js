@@ -3,7 +3,7 @@ import { logger } from "./log.js";
 
 const log = logger("db");
 
-function makePool(conf, queryTimeoutMs) {
+function makePool(conf, queryTimeoutSeconds) {
   return mysql.createPool({
     host: conf.host,
     port: conf.port || 3306,
@@ -28,7 +28,8 @@ function makePool(conf, queryTimeoutMs) {
     // some installs negotiate latin1 and class names come back as mojibake
     // ("Sträcka" -> "StrÃ¤cka"). Force utf8mb4 to be safe.
     charset: "utf8mb4",
-    connectTimeout: queryTimeoutMs,
+    // mysql2 expects ms; config is in seconds.
+    connectTimeout: queryTimeoutSeconds * 1000,
   });
 }
 
@@ -40,9 +41,9 @@ export class FailoverPool {
   constructor(cfg) {
     this.cfg = cfg;
     this.failover = cfg.failover;
-    this.primary = makePool(cfg.mysql.primary, this.failover.query_timeout_ms);
+    this.primary = makePool(cfg.mysql.primary, this.failover.query_timeout_s);
     this.secondary = isConfigured(cfg.mysql.secondary)
-      ? makePool(cfg.mysql.secondary, this.failover.query_timeout_ms)
+      ? makePool(cfg.mysql.secondary, this.failover.query_timeout_s)
       : null;
     this.active = "primary";
     this.consecutiveFailures = 0;
@@ -77,7 +78,7 @@ export class FailoverPool {
     try {
       const [rows] = await this._withTimeout(
         pool.query(sql, params),
-        this.failover.query_timeout_ms,
+        this.failover.query_timeout_s * 1000,
       );
       if (this.active === "primary") this.consecutiveFailures = 0;
       return rows;
@@ -135,7 +136,7 @@ export class FailoverPool {
       try {
         const [rows] = await this._withTimeout(
           this.primary.query("SELECT 1 AS ok"),
-          this.failover.query_timeout_ms,
+          this.failover.query_timeout_s * 1000,
         );
         if (rows && rows[0]?.ok === 1) {
           log.info("Primary reachable again");
@@ -147,7 +148,7 @@ export class FailoverPool {
         log.debug(`Primary still down: ${err.message}`);
       }
     };
-    this.recheckTimer = setInterval(tick, this.failover.primary_recheck_ms);
+    this.recheckTimer = setInterval(tick, this.failover.primary_recheck_s * 1000);
   }
 
   async close() {

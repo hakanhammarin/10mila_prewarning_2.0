@@ -2,71 +2,81 @@
 //
 // State machine:
 //   prewarn punched         -> GREEN
-//     70s elapsed                       \
-//     OR <=90s remaining of countdown    } -> YELLOW
-//                                         (whichever fires first)
-//   finishTime set          -> RED, 30s post-finish countdown shown
-//     readInTime set                    \
-//     OR 30s elapsed since finishTime    } -> remove
-//                                         (whichever fires first)
+//     green_s elapsed                   \
+//     OR <=yellow_remaining_s remaining  } -> YELLOW   (yellow_mode=time)
+//     OR last-checkpoint punched         } -> YELLOW   (yellow_mode=checkpoint)
+//   finishTime set          -> RED, post_finish_remove_s countdown shown
+//   post_finish_remove_s elapsed  -> remove
+//
+// readInTime is observed but NOT a removal trigger — the POST_FINISH
+// timer is the only thing that removes rows. We tried using readout as
+// a remove trigger but SimOLA fast-replay collapses prewarn/finish/
+// readout into a single poll, making fresh vs stale indistinguishable.
 //
 // Countdown anchor: `prewarnAt` on a stored row is the SERVER's wall clock
 // at the moment the row was first observed — NOT the DB's `passedTime`.
-// `finishAt` on a stored row is the SERVER's wall clock at the moment we
-// first observed `results.finishTime` set on this row — NOT OLA's
-// race-time finish stamp. Both anchors are locked on first observation
-// and survive later poll updates, so finish/remove transitions don't
-// restart the countdown and (critically) so SimOLA-replay's future-dated
-// finishTimes don't suppress the "Finish" announcement. This keeps the
-// 3:00 countdown and the 5 s post-finish window honest across simulator
-// replays, app restarts, and any timezone / clock skew between OLA's
-// MySQL and this service.
+// `finishAt` likewise anchors to the server's now-time the first time we
+// observed `results.finishTime` set on this row. `lastCheckpointAt` is the
+// server time the first time we saw a splittime with the configured
+// last-checkpoint control. All three anchors are locked on first
+// observation and survive later poll updates.
 //
-// Pre-finish countdown shown on each row = (prewarnAt + etaSeconds) - now.
-// Post-finish countdown shown = (finishAt + POST_FINISH_REMOVE_MS) - now,
-// so the row stays RED with the "until removal" timer visible. ETA starts
-// at DEFAULT_ETA_S (= 3:00) and, as soon as a single completed-runner
-// sample lands inside [ETA_SAMPLE_MIN_S, MAX_ETA_SAMPLE_S], switches to
-// the running AVERAGE of all in-range samples (capped at the most recent 50).
+// Prewarn-dwell: when a row first appears with finishTime already set
+// (SimOLA fast-replay where all events arrived in one poll, or app
+// restart with a runner already past finish), we PARK finishAnchor at
+// `anchorAt + min_prewarn_dwell_s` so the GREEN/YELLOW phase is visible
+// before transitioning to RED. In a real race finishTime arrives minutes
+// after prewarn, so the dwell guard never engages.
 //
-// Stale-readInTime guard: OLA's `rawdata.readInTime` column is rarely
-// reset between race replays, so a fresh prewarn punch routinely arrives
-// for a runner whose rawdata row was read minutes/hours ago in a previous
-// run. We only treat readInTime as a "remove" trigger when it post-dates
-// the prewarn punch (DB-clock comparison); otherwise the row would be
-// filtered the instant it shows up — which is the symptom seen on the
-// dual-runner Ungdomskavlen legs.
+// All durations come from config.state in seconds. The Store converts
+// them to ms internally so its math stays in epoch-ms.
 //
 // Rows are keyed by splitTimeId (one Prewarning per runner per race),
 // grouped by raceClassId for SSE fan-out.
 
-const GREEN_MS = 60000;
-const YELLOW_REMAINING_MS = 60000;
-const POST_FINISH_REMOVE_MS = 5000;
-const DEFAULT_ETA_S = 180;
-// Realistic prewarn→finish bounds for a relay leg: drop anything under
-// 2 s as clock noise / replay artifacts and anything above 10 min as an
-// outlier that would warp the rolling average. The real samples we see
-// in the Ungdomskavlen data sit around 90–120 s, so 600 s gives plenty
-// of headroom for slower legs and individual classes.
-const ETA_SAMPLE_MIN_S = 2;
-const MAX_ETA_SAMPLE_S = 600;
-const ETA_SAMPLE_KEEP = 50;
-
-// Exposed so the server can ship the default value down to the topbar
-// display — the client compares row.etaSeconds against this to decide
-// whether the measured average is currently overriding the default.
-export const DEFAULT_ETA_SECONDS = DEFAULT_ETA_S;
+// If results.modifyDate is within this many ms of splittime.modifyDate
+// the prewarn and finish punches were almost certainly written in the
+// same OLA write batch — typical of SimOLA fast-replay. We treat those
+// rows like fresh live observations (dwell-park) regardless of how old
+// the DB modifyDate is, so the row gets a visible GREEN→RED lifecycle
+// instead of being filtered as "already past post-finish".
+const SAME_BATCH_THRESHOLD_MS = 2_000;
 
 export class Store {
-  constructor() {
+  // cfg is the validated `state` block from config.yml:
+  //   { green_s, yellow_remaining_s, post_finish_remove_s, default_eta_s,
+  //     eta_sample_min_s, eta_sample_max_s, eta_sample_keep,
+  //     yellow_mode: "time" | "checkpoint", last_checkpoint_control }
+  constructor(cfg) {
+    this.cfg = cfg;
+    this._greenMs = cfg.green_s * 1000;
+    this._yellowRemainingMs = cfg.yellow_remaining_s * 1000;
+    this._postFinishRemoveMs = cfg.post_finish_remove_s * 1000;
+    this._defaultEtaS = cfg.default_eta_s;
+    this._minSampleS = cfg.eta_sample_min_s;
+    this._maxSampleS = cfg.eta_sample_max_s;
+    this._sampleKeep = cfg.eta_sample_keep;
+    this._yellowMode = cfg.yellow_mode;
+    this._minPrewarnDwellMs = (cfg.min_prewarn_dwell_s ?? 0) * 1000;
+
     /** raceClassId -> Map(splitId -> row) */
     this.byClass = new Map();
-    /** raceClassId -> { samples: number[], etaSeconds: number }
-     *  (each raceClassId already corresponds to a single relay leg). */
+    /** raceClassId -> { samples: number[], etaSeconds: number } */
     this.etaByClass = new Map();
     /** eventClassId -> { id, name, raceClassIds: number[] } */
     this.groups = new Map();
+  }
+
+  get defaultEtaSeconds() {
+    return this._defaultEtaS;
+  }
+
+  get yellowMode() {
+    return this._yellowMode;
+  }
+
+  get lastCheckpointName() {
+    return this.cfg.last_checkpoint_name;
   }
 
   // rows: [{ eventClassId, name, raceClassId, relayLeg }, ...]
@@ -137,14 +147,11 @@ export class Store {
     const splitId = dbRow.splitId;
     const prev = map.get(splitId);
 
-    // Detect the prewarn→finish transition using the DB stamps (those are
-    // the only thing that tells us "a finish punch just landed"), but
-    // ANCHOR the state-machine clock to the server's now-time on that
-    // transition. SimOLA's Schedule_Replay writes finishTime with the
-    // SIMULATED race time, which is currently ~40 min in the future of
-    // real wall clock — gating on `finishAt <= now` would hide the finish
-    // announcement entirely. Anchoring server-side means: as soon as we
-    // observe a fresh finishTime on a row, the 5 s "Finish" window starts.
+    // Detect the prewarn→finish transition using the DB stamps (the only
+    // thing that tells us "a finish punch just landed"), but anchor the
+    // state-machine clock to the server's now-time. SimOLA replay writes
+    // future-dated finishTimes; gating on `finishAt <= now` would hide
+    // the finish announcement entirely.
     const dbPrewarnMs = toMs(dbRow.prewarnAt);
     const dbFinishMs = toMs(dbRow.finishTime);
     const justFinished = dbFinishMs != null && !prev?.finishAt;
@@ -152,22 +159,68 @@ export class Store {
       this.recordFinishedSample(raceClassId, dbPrewarnMs, dbFinishMs);
     }
 
-    // Server-time anchors: lock on first observation, never restart.
-    const anchorAt = prev?.prewarnAt ?? Date.now();
-    // finishAt is null if no DB finish yet; otherwise it's the server-
-    // observed timestamp of the *transition* (preserved across later polls).
-    // If DB finishTime gets cleared (prep / cleanup), un-anchor.
-    let finishAnchor;
-    if (dbFinishMs == null) finishAnchor = null;
-    else if (prev?.finishAt != null) finishAnchor = prev.finishAt;
-    else finishAnchor = Date.now();
+    // Anchoring strategy — uses the DB's `stModifyDate` (when OLA wrote
+    // the splittime) as the prewarn anchor in ALL cases. That timestamp
+    // is real-clock and so works equally well for live observations
+    // (~Date.now()) and back-fill after a restart (historical). The
+    // state machine then derives the finish anchor from it:
+    //
+    //  * Same-batch write (SimOLA fast-replay, or any case where OLA
+    //    wrote prewarn+finish within ~2 s): park finish at anchorAt +
+    //    min_prewarn_dwell_s. A row that was prewarned N seconds ago
+    //    naturally lands at the right phase — GREEN if N < dwell,
+    //    RED if N >= dwell, dropped if N > dwell + post_finish_remove.
+    //  * Real-race (modifyDates spread out): anchor finish at
+    //    results.modifyDate (the real-clock time OLA recorded the
+    //    finish). POST_FINISH window naturally drops rows past their
+    //    lifecycle. This is the genuine "fast-forward to current
+    //    state" path after a restart.
+    const realNow = Date.now();
+    const stModifyMs = toMs(dbRow.stModifyDate);
+    const resModifyMs = toMs(dbRow.resModifyDate);
+    const sameBatch =
+      resModifyMs != null &&
+      stModifyMs != null &&
+      Math.abs(resModifyMs - stModifyMs) < SAME_BATCH_THRESHOLD_MS;
 
-    const next = projectRow(
-      dbRow,
-      this.etaSeconds(raceClassId),
+    const anchorAt = prev?.prewarnAt ?? stModifyMs ?? realNow;
+
+    let finishAnchor;
+    if (dbFinishMs == null) {
+      finishAnchor = null;
+    } else if (prev?.finishAt != null) {
+      finishAnchor = prev.finishAt;
+    } else if (sameBatch) {
+      // Prewarn and finish were one OLA write — dwell-park from the
+      // prewarn anchor so the GREEN phase plays out (or has played out,
+      // for older rows; POST_FINISH then drops them).
+      finishAnchor = anchorAt + this._minPrewarnDwellMs;
+    } else if (resModifyMs != null) {
+      // Real-race: finish written after prewarn. Anchor at the actual
+      // resModifyDate. Never anchor finish before prewarn.
+      finishAnchor = Math.max(resModifyMs, anchorAt);
+    } else if (prev) {
+      // Live transition: prev existed without finish, finish just arrived.
+      finishAnchor = realNow;
+    } else {
+      // Defensive — finish set but no modifyDate. Fall back to dwell.
+      finishAnchor = anchorAt + this._minPrewarnDwellMs;
+    }
+    // lastCheckpointAt is driven by recordLastCheckpoint() — not derived
+    // from the prewarning query — so we just carry the previous value.
+    const lastCheckpointAt = prev?.lastCheckpointAt ?? null;
+
+    // readInTime is observed but no longer drives row removal — we used
+    // to remove on fresh readout, but the SimOLA fast-replay collapses
+    // readouts into the same poll as prewarn, making it impossible to
+    // tell stale from fresh. Now POST_FINISH_REMOVE_MS is the sole
+    // removal trigger.
+
+    const next = this._project(dbRow, this._etaSecondsFor(raceClassId), {
       anchorAt,
       finishAnchor,
-    );
+      lastCheckpointAt,
+    });
 
     if (next.removed) {
       if (prev) {
@@ -183,14 +236,62 @@ export class Store {
     return { kind: "updated", raceClassId, row: next };
   }
 
+  // Anchor lastCheckpointAt for the row matching this resultId, if any.
+  // Returns { kind: "updated", raceClassId, row } on a successful anchor,
+  // or null if no matching active row exists / already anchored.
+  recordLastCheckpoint(resultId, observedAt = Date.now()) {
+    for (const [raceClassId, map] of this.byClass) {
+      for (const [splitId, row] of map) {
+        if (row.resultId !== resultId) continue;
+        if (row.lastCheckpointAt != null) return null;
+        // Park lastCheckpointAt no earlier than `anchorAt + green_s` so
+        // the GREEN phase has time to render before transitioning to
+        // YELLOW. In a real race ctrl 100 fires well after green_s and
+        // this is a no-op; in SimOLA fast-replay (where ctrl 100 lands
+        // in the same OLA write as the prewarn) it spaces the phases.
+        const minCpAnchor = row.prewarnAt + this._greenMs;
+        const lastCheckpointAt = Math.max(observedAt, minCpAnchor);
+
+        // If a finishAnchor was already parked from the prewarn poll
+        // (SimOLA same-batch finish), push it out so the YELLOW phase
+        // has time to render between the "Last" stamp and "Finish". Use
+        // min_prewarn_dwell_s as the YELLOW duration. In a real race
+        // the actual finishAt is later than this anyway, so the
+        // Math.max keeps the genuine observation.
+        let finishAt = row.finishAt;
+        let removeAt = row.removeAt;
+        if (finishAt != null) {
+          const minFinishAfterCp = lastCheckpointAt + this._minPrewarnDwellMs;
+          if (finishAt < minFinishAfterCp) {
+            finishAt = minFinishAfterCp;
+            removeAt = finishAt + this._postFinishRemoveMs;
+          }
+        }
+
+        const now = Date.now();
+        const refreshed = { ...row, lastCheckpointAt, finishAt, removeAt };
+        refreshed.stripe = this._computeStripe({
+          prewarnAt: refreshed.prewarnAt,
+          finishAt: refreshed.finishAt,
+          lastCheckpointAt: refreshed.lastCheckpointAt,
+          now,
+          etaSeconds: refreshed.etaSeconds,
+        });
+        map.set(splitId, refreshed);
+        return { kind: "updated", raceClassId, row: refreshed };
+      }
+    }
+    return null;
+  }
+
   // Re-evaluate all rows against the wall clock (state transitions GREEN
-  // -> YELLOW based on elapsed time, fallback removal on finishTime + 2 min).
+  // -> YELLOW based on elapsed time, removal on finishAnchor + post_finish_remove_s).
   // Returns a list of changes.
   tick(now = Date.now()) {
     const changes = [];
     for (const [raceClassId, map] of this.byClass) {
       for (const [splitId, row] of map) {
-        const refreshed = recomputeStripe(row, now);
+        const refreshed = this._recompute(row, now);
         if (refreshed.removed) {
           map.delete(splitId);
           changes.push({ kind: "removed", raceClassId, row });
@@ -206,14 +307,16 @@ export class Store {
   }
 
   // Inject finished samples to seed the rolling average. Samples outside
-  // [ETA_SAMPLE_MIN_S, MAX_ETA_SAMPLE_S] are dropped as noise/outliers.
+  // [eta_sample_min_s, eta_sample_max_s] are dropped as noise/outliers.
   // The ETA switches to the average as soon as a single in-range sample
-  // exists; otherwise DEFAULT_ETA_S stays in effect.
+  // exists; otherwise default_eta_s stays in effect.
   setFinishedSamples(raceClassId, samples) {
     const durations = samples
       .map((s) => durationSeconds(s.prewarnAt, s.finishTime))
-      .filter((s) => s != null && s >= ETA_SAMPLE_MIN_S && s <= MAX_ETA_SAMPLE_S)
-      .slice(-ETA_SAMPLE_KEEP);
+      .filter(
+        (s) => s != null && s >= this._minSampleS && s <= this._maxSampleS,
+      )
+      .slice(-this._sampleKeep);
     this._setEtaFromDurations(raceClassId, durations);
   }
 
@@ -222,19 +325,19 @@ export class Store {
   // without waiting for the next full seed query.
   recordFinishedSample(raceClassId, prewarnAtMs, finishAtMs) {
     const dur = durationSeconds(prewarnAtMs, finishAtMs);
-    if (dur == null || dur < ETA_SAMPLE_MIN_S || dur > MAX_ETA_SAMPLE_S) return;
+    if (dur == null || dur < this._minSampleS || dur > this._maxSampleS) return;
     const cur = this.etaByClass.get(raceClassId);
     const next = cur ? [...cur.samples, dur] : [dur];
-    if (next.length > ETA_SAMPLE_KEEP) next.splice(0, next.length - ETA_SAMPLE_KEEP);
+    if (next.length > this._sampleKeep) {
+      next.splice(0, next.length - this._sampleKeep);
+    }
     this._setEtaFromDurations(raceClassId, next);
   }
 
   _setEtaFromDurations(raceClassId, durations) {
-    const eta = durations.length >= 1
-      ? Math.round(average(durations))
-      : DEFAULT_ETA_S;
+    const eta =
+      durations.length >= 1 ? Math.round(average(durations)) : this._defaultEtaS;
     this.etaByClass.set(raceClassId, { samples: durations, etaSeconds: eta });
-    // Refresh existing rows in this class with the new ETA.
     const map = this.byClass.get(raceClassId);
     if (!map) return;
     for (const [splitId, row] of map) {
@@ -242,78 +345,91 @@ export class Store {
     }
   }
 
+  _etaSecondsFor(raceClassId) {
+    return this.etaByClass.get(raceClassId)?.etaSeconds ?? this._defaultEtaS;
+  }
+
+  // Back-compat: poll.js used to call `etaSeconds(raceClassId)`.
   etaSeconds(raceClassId) {
-    return this.etaByClass.get(raceClassId)?.etaSeconds ?? DEFAULT_ETA_S;
-  }
-}
-
-function projectRow(db, etaSeconds, anchorAt, finishAnchor) {
-  const dbPrewarnAt = toMs(db.prewarnAt);
-  const readInAt = toMs(db.readInTime);
-  const now = Date.now();
-
-  // readInTime is a "remove" trigger only when it post-dates the prewarn
-  // punch in DB-clock terms. Stale readInTimes from a previous OLA replay
-  // (where rawdata.readInTime was never cleared) would otherwise drop
-  // every freshly-prewarned row immediately — the Ungdomskavlen dual-
-  // runner symptom.
-  if (readInAt && dbPrewarnAt && readInAt > dbPrewarnAt) {
-    return { removed: true };
+    return this._etaSecondsFor(raceClassId);
   }
 
-  // Post-finish removal uses the server-anchored finish — independent of
-  // whatever (future-dated) value OLA wrote to results.finishTime.
-  if (finishAnchor != null && now - finishAnchor > POST_FINISH_REMOVE_MS) {
-    return { removed: true };
+  _project(db, etaSeconds, { anchorAt, finishAnchor, lastCheckpointAt }) {
+    const now = Date.now();
+
+    // Post-finish removal is the only removal trigger. Uses the server-
+    // anchored finish — independent of whatever (future-dated) value OLA
+    // wrote to results.finishTime, and independent of readInTime.
+    if (finishAnchor != null && now - finishAnchor > this._postFinishRemoveMs) {
+      return { removed: true };
+    }
+
+    const stripe = this._computeStripe({
+      prewarnAt: anchorAt,
+      finishAt: finishAnchor,
+      lastCheckpointAt,
+      now,
+      etaSeconds,
+    });
+    const removeAt =
+      finishAnchor != null ? finishAnchor + this._postFinishRemoveMs : null;
+    return {
+      splitId: db.splitId,
+      resultId: db.resultId ?? null,
+      raceClassId: db.raceClassId,
+      raceClassName: db.raceClassName,
+      leg: db.leg,
+      bib: db.bib,
+      teamName: db.teamName ?? "",
+      prewarnAt: anchorAt,
+      finishAt: finishAnchor,
+      lastCheckpointAt,
+      removeAt,
+      etaSeconds,
+      stripe,
+    };
   }
 
-  const stripe = computeStripe({
-    prewarnAt: anchorAt,
-    finishAt: finishAnchor,
-    now,
-    etaSeconds,
-  });
-  const removeAt =
-    finishAnchor != null ? finishAnchor + POST_FINISH_REMOVE_MS : null;
-  return {
-    splitId: db.splitId,
-    raceClassId: db.raceClassId,
-    raceClassName: db.raceClassName,
-    leg: db.leg,
-    bib: db.bib,
-    teamName: db.teamName ?? "",
-    prewarnAt: anchorAt,
-    finishAt: finishAnchor,
-    removeAt,
-    etaSeconds,
-    stripe,
-  };
-}
-
-function recomputeStripe(row, now) {
-  if (row.finishAt != null && now - row.finishAt > POST_FINISH_REMOVE_MS) {
-    return { ...row, removed: true };
+  _recompute(row, now) {
+    if (
+      row.finishAt != null &&
+      now - row.finishAt > this._postFinishRemoveMs
+    ) {
+      return { ...row, removed: true };
+    }
+    const stripe = this._computeStripe({
+      prewarnAt: row.prewarnAt,
+      finishAt: row.finishAt,
+      lastCheckpointAt: row.lastCheckpointAt,
+      now,
+      etaSeconds: row.etaSeconds,
+    });
+    return stripe === row.stripe ? row : { ...row, stripe };
   }
-  const stripe = computeStripe({
-    prewarnAt: row.prewarnAt,
-    finishAt: row.finishAt,
-    now,
-    etaSeconds: row.etaSeconds,
-  });
-  return stripe === row.stripe ? row : { ...row, stripe };
-}
 
-function computeStripe({ prewarnAt, finishAt, now, etaSeconds }) {
-  if (finishAt) return "red";
-  if (!prewarnAt) return "green";
-  const elapsed = now - prewarnAt;
-  if (elapsed >= GREEN_MS) return "yellow";
-  // Also flip to YELLOW when the countdown is within 90 s of ETA — for
-  // short legs that's earlier than the elapsed-time rule, for long legs
-  // it's later (so the elapsed rule wins).
-  const remaining = (etaSeconds ?? DEFAULT_ETA_S) * 1000 - elapsed;
-  if (remaining <= YELLOW_REMAINING_MS) return "yellow";
-  return "green";
+  _computeStripe({ prewarnAt, finishAt, lastCheckpointAt, now, etaSeconds }) {
+    // finishAt may be parked in the future when prewarn+finish arrived in
+    // the same poll (SimOLA fast-replay). Treat as "not yet finished" until
+    // wall clock crosses it, so the row plays through GREEN/YELLOW first.
+    if (finishAt != null && finishAt <= now) return "red";
+    if (!prewarnAt) return "green";
+
+    if (this._yellowMode === "checkpoint") {
+      // lastCheckpointAt may be parked at `prewarnAt + green_s` when ctrl
+      // 100 was observed in the same OLA write as the prewarn. Gate on
+      // `<= now` so GREEN renders until the parked moment elapses.
+      const cpReached =
+        lastCheckpointAt != null && lastCheckpointAt <= now;
+      return cpReached ? "yellow" : "green";
+    }
+
+    // yellow_mode === "time"
+    const elapsed = now - prewarnAt;
+    if (elapsed >= this._greenMs) return "yellow";
+    const remaining = (etaSeconds ?? this._defaultEtaS) * 1000 - elapsed;
+    if (remaining <= this._yellowRemainingMs) return "yellow";
+    return "green";
+  }
 }
 
 function rowEqualForUI(a, b) {
@@ -324,6 +440,7 @@ function rowEqualForUI(a, b) {
     a.leg === b.leg &&
     a.prewarnAt === b.prewarnAt &&
     a.finishAt === b.finishAt &&
+    a.lastCheckpointAt === b.lastCheckpointAt &&
     a.removeAt === b.removeAt &&
     a.etaSeconds === b.etaSeconds
   );
@@ -344,7 +461,7 @@ function durationSeconds(a, b) {
 }
 
 function average(arr) {
-  if (arr.length === 0) return DEFAULT_ETA_S;
+  if (arr.length === 0) return 0;
   let sum = 0;
   for (const v of arr) sum += v;
   return sum / arr.length;
