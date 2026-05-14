@@ -1,0 +1,315 @@
+:root {
+  --bg: #0b0b0d;
+  --panel: #16161a;
+  --panel-2: #1d1d22;
+  --text: #f5f5f7;
+  --muted: #8a8a92;
+  --border: #25252c;
+  --green: #2ecc71;
+  --yellow: #f1c40f;
+  --red: #e74c3c;
+  --accent: #4aa3ff;
+  --row-h: clamp(56px, 7vh, 96px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Helvetica, Arial,
+    sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  z-index: 10;
+}
+
+.eta-display {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0 1rem;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  line-height: 1;
+}
+
+.eta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.eta-row[hidden] {
+  display: none;
+}
+
+.eta-label {
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: clamp(1.5rem, 3vw, 2.4rem);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ETA values share the clock's typography + size so the topbar reads as
+   one coherent monospaced cluster. */
+.eta-value {
+  font-family: "Share Tech Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: clamp(2.4rem, 5vw, 4rem);
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.eta-row-avg .eta-label,
+.eta-value-avg {
+  color: var(--accent);
+}
+
+.clock {
+  font-family: "Share Tech Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: clamp(2.4rem, 5vw, 4rem);
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.clock-sep {
+  display: inline-block;
+  width: 0.45em;
+  text-align: center;
+  transition: opacity 0.2s ease;
+}
+
+.clock-sep.off {
+  opacity: 0.15;
+}
+
+.class-name {
+  text-align: center;
+  font-size: clamp(1.5rem, 3vw, 2.4rem);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.class-picker {
+  position: relative;
+}
+
+.class-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  opacity: 0.35;
+  transition: opacity 0.2s ease, background 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1rem;
+}
+
+.class-btn:hover,
+.class-btn:focus,
+.class-btn[aria-expanded="true"] {
+  opacity: 1;
+  background: var(--panel-2);
+  outline: none;
+}
+
+.class-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.4rem);
+  min-width: 240px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.25rem;
+  margin: 0;
+  list-style: none;
+  z-index: 20;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.5);
+}
+
+.class-list li {
+  padding: 0.6rem 0.75rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.class-list li:hover,
+.class-list li[aria-selected="true"] {
+  background: rgba(74, 163, 255, 0.18);
+}
+
+.failover-banner {
+  background: #4a2a00;
+  color: #ffd58a;
+  border-bottom: 1px solid #6b3d00;
+  padding: 0.5rem 1rem;
+  text-align: center;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.main {
+  position: relative;
+  height: calc(100vh - 96px);
+  overflow: hidden;
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem 0;
+  height: 100%;
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 8px 5rem 1fr 6rem 6rem 7rem;
+  align-items: center;
+  gap: 1rem;
+  /* height: var(--row-h);*/
+  padding: 0 1rem 0 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  transition: transform 0.6s ease, opacity 0.4s ease,
+    background 0.3s ease;
+  will-change: transform, opacity;
+}
+
+.row.removing {
+  opacity: 0;
+  transform: translateY(-100%);
+}
+
+.stripe {
+  height: 100%;
+  width: 15px;
+  background: var(--green);
+  transition: background 0.6s ease;
+}
+
+.stripe.green {
+  background: var(--green);
+}
+.stripe.yellow {
+  background: var(--yellow);
+}
+.stripe.red {
+  background: var(--red);
+}
+
+.leg,
+.finish {
+  /* font-family: "Share Tech Mono", ui-monospace, monospace; */
+  font-size: clamp(1.4rem, 3vw, 2.2rem);
+  color: var(--muted);
+  text-align: right;
+}
+
+.team {
+  font-size: clamp(1.4rem, 3vw, 2.4rem);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bib {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+/*  font-family: "Share Tech Mono", ui-monospace, monospace; */
+  font-size: clamp(2.4rem, 2.6vw, 2rem);
+  font-weight: 700;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
+  letter-spacing: 0.04em;
+}
+
+.countdown {
+  font-family: "Share Tech Mono", ui-monospace, monospace;
+  font-size: clamp(1.6rem, 3.4vw, 2.6rem);
+  text-align: right;
+  color: var(--text);
+}
+
+.countdown.frozen {
+  color: var(--muted);
+}
+
+.empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  pointer-events: none;
+  gap: 1.5rem;
+}
+
+.empty[hidden] {
+  display: none;
+}
+
+.empty-clock {
+  font-family: "Share Tech Mono", ui-monospace, monospace;
+  font-size: clamp(6rem, 18vw, 18rem);
+  letter-spacing: 0.04em;
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.empty-text {
+  font-size: clamp(1.3rem, 2.4vw, 2rem);
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.conn {
+  position: fixed;
+  bottom: 1rem;
+  right: 1rem;
+  background: rgba(231, 76, 60, 0.18);
+  border: 1px solid var(--red);
+  color: #ffb4ac;
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}

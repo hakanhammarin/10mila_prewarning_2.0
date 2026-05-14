@@ -1,0 +1,27 @@
+[Unit]
+Description=Prewarning display (Node.js + MySQL + SSE)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prewarning
+Group=prewarning
+WorkingDirectory=/opt/prewarning
+Environment=NODE_ENV=production
+Environment=PREWARNING_CONFIG=/etc/prewarning/config.yml
+ExecStart=/usr/bin/node /opt/prewarning/src/index.js
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/prewarning
+
+[Install]
+WantedBy=multi-user.target

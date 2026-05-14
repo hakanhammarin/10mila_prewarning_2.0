@@ -1,0 +1,23 @@
+mysql:
+  primary:
+    host: 192.168.1.21
+    port: 3306
+    user: *****
+    password: ********
+    database: tiomila2026
+  secondary:
+    host: ""        # fyll i natten innan loppet
+    port: 3306
+    user: ""
+    password: ""
+    database: tiomila2026
+
+poll_interval_ms: 1000
+http_port: 8080
+
+# Tröskel för failover: antal pollar i rad som måste misslyckas innan vi
+# byter till sekundär, samt query-timeout i ms.
+failover:
+  failures_before_switch: 3
+  query_timeout_ms: 3000
+  primary_recheck_ms: 30000

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="sv">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prewarning</title>
+    <link
+      rel="preconnect"
+      href="https://fonts.googleapis.com"
+      crossorigin
+    />
+    <link
+      rel="preconnect"
+      href="https://fonts.gstatic.com"
+      crossorigin
+    />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Share+Tech+Mono&display=swap"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="clock" id="clock">
+        <span id="clock-hh">00</span><span class="clock-sep" id="clock-sep">:</span><span id="clock-mm">00</span><span class="clock-sep">:</span><span id="clock-ss">00</span>
+      </div>
+      <div class="eta-display" id="eta-display">
+        <div class="eta-row">
+          <span class="eta-label">Default ETA</span>
+          <span class="eta-value" id="eta-default">--:--</span>
+        </div>
+        <div class="eta-row eta-row-avg" id="eta-avg-row" hidden>
+          <span class="eta-label">Avg ETA</span>
+          <span class="eta-value eta-value-avg" id="eta-avg">--:--</span>
+        </div>
+      </div>
+      <div class="class-name" id="class-name">—</div>
+      <div class="class-picker">
+        <button id="class-btn" class="class-btn" type="button" aria-haspopup="listbox">
+          <span id="class-btn-label">Välj klass</span>
+          <span class="caret">▾</span>
+        </button>
+        <ul id="class-list" class="class-list" role="listbox" hidden></ul>
+      </div>
+    </header>
+
+    <div id="failover-banner" class="failover-banner" hidden>
+      📡 sekundär databas
+    </div>
+
+    <main class="main">
+      <ol id="rows" class="rows"></ol>
+      <div id="empty" class="empty">
+        <div class="empty-clock" id="empty-clock">--:--</div>
+        <div class="empty-text" id="empty-text">Väntar på data…</div>
+      </div>
+      <div id="connection" class="conn" hidden>frånkopplad – återansluter…</div>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
