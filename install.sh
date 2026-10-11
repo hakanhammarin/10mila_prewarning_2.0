@@ -62,7 +62,8 @@ copy_app() {
 
 install_deps() {
   echo "Installing npm dependencies (production)"
-  sudo -u "$SERVICE_USER" -H bash -c "cd '$APP_DIR' && npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund"
+  # The service user has no home directory, so npm gets a cache folder inside the app directory.
+  sudo -u "$SERVICE_USER" -H bash -c "cd '$APP_DIR' && export npm_config_cache='$APP_DIR/.npm-cache' && (npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund)"
 }
 
 install_config() {

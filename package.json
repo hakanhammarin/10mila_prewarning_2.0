@@ -1,0 +1,21 @@
+{
+  "name": "prewarning",
+  "version": "1.0.0",
+  "description": "Prewarning display for relay events — Node.js + MySQL + SSE",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "simulate": "node src/simulate.js",
+    "build-sf-replay": "node src/build-sf-replay.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "js-yaml": "^4.1.0",
+    "mysql2": "^3.11.0"
+  }
+}
