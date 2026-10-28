@@ -182,6 +182,18 @@ export const QUERIES = {
     ORDER BY r.finishTime ASC
     LIMIT 50
   `,
+
+  // SI card -> team, leg and runner, for the teamtracker kiosk at the IN gate.
+  cardTeam: `
+    SELECT e.bibNumber AS bib, rc.relayLeg AS leg, r.relayPersonOrder AS runner
+    FROM electronicpunchingcards c
+    JOIN results r      ON r.electronicPunchingCardId = c.cardId
+    JOIN entries e      ON e.entryId = r.entryId
+    JOIN raceclasses rc ON rc.raceClassId = r.raceClassId
+    WHERE c.cardNumber = ?
+    ORDER BY rc.relayLeg
+    LIMIT 1
+  `,
 };
 
 export const SQL_EPOCH = "1970-01-01 00:00:00";

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { loadConfig } from "./config.js";
 import { FailoverPool } from "./db.js";
+import { QUERIES } from "./queries.js";
 import { Store } from "./state.js";
 import { SseBroker } from "./sse.js";
 import { Poller } from "./poll.js";
@@ -45,6 +46,23 @@ async function main() {
       classes: store.groupList().length,
       sseClients: broker.countSubscribers(),
     });
+  });
+
+  // SI card -> {bib, leg, runner} for the teamtracker kiosk (10mila-teamtracker-ui).
+  // OLA's teamtracker has no card lookup; this keeps the database account off the kiosk.
+  app.get("/api/card/:number", async (req, res) => {
+    if (!/^\d{1,9}$/.test(req.params.number)) {
+      return res.status(400).json({ error: "bad card number" });
+    }
+    try {
+      const rows = await db.query(QUERIES.cardTeam, [Number(req.params.number)]);
+      if (rows.length === 0) return res.status(404).json({ error: "not found" });
+      const { bib, leg, runner } = rows[0];
+      res.json({ bib: Number(bib), leg, runner });
+    } catch (err) {
+      log.warn(`card lookup failed: ${err.message}`);
+      res.status(503).json({ error: "database unavailable" });
+    }
   });
 
   app.get("/classes", (_req, res) => {
